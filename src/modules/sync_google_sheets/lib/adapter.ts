@@ -354,6 +354,7 @@ export const googleSheetsAdapter: DataSyncAdapter = {
     const credentialsService = container.resolve('integrationCredentialsService') as CredentialsService
     const bindingService = createSheetBindingService(em)
     const hashService = createContentHashService(em)
+    const externalIdMappingService = container.resolve('externalIdMappingService') as ExternalIdMappingService
 
     const binding = await bindingService.get(input.entityType, input.scope)
     if (!binding) throw new Error(`No Google Sheets binding configured for ${input.entityType}.`)
@@ -400,9 +401,100 @@ export const googleSheetsAdapter: DataSyncAdapter = {
     const hashFields = (fields: Record<string, unknown>): string =>
       computeContentHash(normalize ? normalize(fields) : fields)
 
-    // For bidirectional export we need the sheet's *current* content to detect conflicts, so
-    // read the full data block once and hash each row (keyed by externalId). Export-only
-    // treats Mercato as the source of truth and never inspects the sheet's content.
+    const writerCtx: WriterContext = {
+      scope: input.scope,
+      container,
+      em,
+      integrationId: SYNC_GOOGLE_SHEETS_INTEGRATION_ID,
+      entityType: input.entityType,
+    }
+
+    const { phase, offset } = parseExportCursor(input.cursor)
+
+    // ── Phase 'new': export records created in Mercato that have no id-mapping yet. Enumerate
+    // via the writer, derive each record's external id from its key-column value, then append a
+    // new row (or overwrite an existing row with the same key) and record the id-mapping so
+    // future runs treat it as an update. ──
+    if (phase === 'new') {
+      const results: ExportItemResult[] = []
+      const listFn = writer?.list?.bind(writer)
+      if (!listFn) {
+        // Writer can't enumerate — there's nothing to export as new.
+        yield { results, cursor: buildExportCursor('new', offset), hasMore: false, batchIndex: 0 }
+        await bindingService.touchWatermark(input.entityType, { lastSyncedAt: new Date() }, scope)
+        return
+      }
+      const listed = await listFn(writerCtx, { offset, limit: input.batchSize })
+      const appendRows: unknown[][] = []
+      const inPlace: Array<{ range: string; values: unknown[][] }> = []
+      const pendingMappings: Array<{ localId: string; externalId: string; hash: string }> = []
+
+      for (const { localId, record } of listed.items) {
+        try {
+          const mapped = await externalIdMappingService.lookupExternalId(
+            SYNC_GOOGLE_SHEETS_INTEGRATION_ID,
+            input.entityType,
+            localId,
+            input.scope,
+          )
+          if (mapped) {
+            // Already mapped — the updates phase owns it.
+            results.push({ localId, externalId: mapped, status: 'skipped', error: 'already mapped' })
+            continue
+          }
+          const externalId = deriveExternalId(record, input.mapping, binding.keyColumn)
+          if (!externalId) {
+            results.push({ localId, externalId: '', status: 'skipped', error: 'record has no key-column value' })
+            continue
+          }
+          const rowValues = recordToRow(headers, record, input.mapping)
+          const existingRow = rowByExternalId.get(externalId)
+          if (existingRow != null) {
+            // The sheet already holds this key (or a prior interrupted run appended it) —
+            // overwrite that row rather than appending a duplicate; keeps the phase retry-safe.
+            inPlace.push({ range: `${quoteTitle(tab.title)}!A${existingRow}:${endCol}${existingRow}`, values: [rowValues] })
+          } else {
+            appendRows.push(rowValues)
+          }
+          pendingMappings.push({ localId, externalId, hash: hashFields(record.fields) })
+          results.push({ localId, externalId, status: 'success' })
+        } catch (error) {
+          results.push({
+            localId,
+            externalId: '',
+            status: 'error',
+            error: error instanceof Error ? error.message : 'new-record export failed',
+          })
+        }
+      }
+
+      if (appendRows.length > 0) {
+        await client.appendValues(binding.spreadsheetId, `${quoteTitle(tab.title)}!A${binding.dataStartRow}`, appendRows)
+      }
+      if (inPlace.length > 0) {
+        await client.batchUpdateValues(binding.spreadsheetId, inPlace)
+      }
+      // Writes landed — record id-mappings + baselines so subsequent runs treat these as mapped.
+      for (const { localId, externalId, hash } of pendingMappings) {
+        await externalIdMappingService.storeExternalIdMapping(
+          SYNC_GOOGLE_SHEETS_INTEGRATION_ID,
+          input.entityType,
+          localId,
+          externalId,
+          input.scope,
+        )
+        await hashService.setBaseline(input.entityType, externalId, hash, scope)
+      }
+
+      yield { results, cursor: buildExportCursor('new', offset + listed.items.length), hasMore: listed.hasMore, batchIndex: 0 }
+      if (!listed.hasMore) await bindingService.touchWatermark(input.entityType, { lastSyncedAt: new Date() }, scope)
+      return
+    }
+
+    // ── Phase 'updates': push updates to records this integration already mapped. ──
+    // For bidirectional export we need the sheet's current content to detect conflicts, so read
+    // the full data block once and hash each row (keyed by externalId). Export-only treats
+    // Mercato as the source of truth and never inspects the sheet's content.
     const sheetHashByExternalId = new Map<string, string>()
     if (enforceConflicts && keyValues.length > 0) {
       const lastDataRow = binding.dataStartRow + keyValues.length - 1
@@ -413,8 +505,6 @@ export const googleSheetsAdapter: DataSyncAdapter = {
       }
     }
 
-    // Export candidates: records this integration already mapped, paged by cursor offset.
-    const offset = input.cursor ? safeParseExportOffset(input.cursor) : 0
     const mappings = await findWithDecryption(
       em,
       SyncExternalIdMapping,
@@ -428,14 +518,6 @@ export const googleSheetsAdapter: DataSyncAdapter = {
       { orderBy: { lastSyncedAt: 'asc' }, limit: input.batchSize, offset },
       scope,
     )
-
-    const writerCtx: WriterContext = {
-      scope: input.scope,
-      container,
-      em,
-      integrationId: SYNC_GOOGLE_SHEETS_INTEGRATION_ID,
-      entityType: input.entityType,
-    }
 
     const results: ExportItemResult[] = []
     const updates: Array<{ range: string; values: unknown[][] }> = []
@@ -511,8 +593,14 @@ export const googleSheetsAdapter: DataSyncAdapter = {
       }
     }
 
-    const hasMore = mappings.length >= input.batchSize
-    yield { results, cursor: buildExportCursor(offset + mappings.length), hasMore, batchIndex: 0 }
+    // When this page of updates is full there may be more; otherwise move on to the new-record
+    // phase (append records created in Mercato that have no sheet row yet).
+    const moreUpdates = mappings.length >= input.batchSize
+    const hasMore = moreUpdates || typeof writer?.list === 'function'
+    const nextCursor = moreUpdates
+      ? buildExportCursor('updates', offset + mappings.length)
+      : buildExportCursor('new', 0)
+    yield { results, cursor: nextCursor, hasMore, batchIndex: 0 }
 
     if (!hasMore) {
       await bindingService.touchWatermark(input.entityType, { lastSyncedAt: new Date() }, scope)
@@ -533,16 +621,28 @@ function safeParseImportRowOffset(raw: string): number {
     return 0
   }
 }
-function buildExportCursor(offset: number): string {
-  return JSON.stringify({ kind: 'gs-export', offset })
+type ExportPhase = 'updates' | 'new'
+function buildExportCursor(phase: ExportPhase, offset: number): string {
+  return JSON.stringify({ kind: 'gs-export', phase, offset })
 }
-function safeParseExportOffset(raw: string): number {
+function parseExportCursor(raw: string | undefined): { phase: ExportPhase; offset: number } {
+  if (!raw) return { phase: 'updates', offset: 0 }
   try {
-    const parsed = JSON.parse(raw) as { offset?: number }
-    return typeof parsed?.offset === 'number' && parsed.offset >= 0 ? Math.floor(parsed.offset) : 0
+    const parsed = JSON.parse(raw) as { phase?: string; offset?: number }
+    const phase: ExportPhase = parsed?.phase === 'new' ? 'new' : 'updates'
+    const offset = typeof parsed?.offset === 'number' && parsed.offset >= 0 ? Math.floor(parsed.offset) : 0
+    return { phase, offset }
   } catch {
-    return 0
+    return { phase: 'updates', offset: 0 }
   }
+}
+/** Derive a new record's external id from the value of its key-column field. */
+function deriveExternalId(record: NormalizedRecord, mapping: DataMapping, keyColumn: string): string | null {
+  const field = (mapping.fields ?? []).find((f) => f.externalField === keyColumn)
+  if (!field) return null
+  const raw = record.fields[field.localField]
+  const value = raw == null ? '' : String(raw).trim()
+  return value.length > 0 ? value : null
 }
 function columnLetter(column: number): string {
   let n = Math.max(1, Math.floor(column))
