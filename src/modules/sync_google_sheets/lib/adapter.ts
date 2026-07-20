@@ -109,9 +109,9 @@ function recordToRow(headers: string[], record: NormalizedRecord, mapping: DataM
         const key = field.localField.startsWith('cf:') ? field.localField.slice(3) : field.localField
         return record.fields[`cf:${key}`] ?? ''
       }
-      if (field.mappingKind !== 'external_id') {
-        return record.fields[field.localField] ?? record.raw?.[header] ?? ''
-      }
+      // Includes the external_id (key) column: read()/list()-derived records carry the key
+      // value under its localField; fall back to any raw source value, then blank.
+      return record.fields[field.localField] ?? record.raw?.[header] ?? ''
     }
     return record.raw?.[header] ?? ''
   })
@@ -486,7 +486,9 @@ export const googleSheetsAdapter: DataSyncAdapter = {
         await hashService.setBaseline(input.entityType, externalId, hash, scope)
       }
 
-      yield { results, cursor: buildExportCursor('new', offset + listed.items.length), hasMore: listed.hasMore, batchIndex: 0 }
+      // Advance by the requested page size (not the post-filter item count) so offset stays on
+      // page boundaries — otherwise filtered rows could drift the page and repeat/stall paging.
+      yield { results, cursor: buildExportCursor('new', offset + input.batchSize), hasMore: listed.hasMore, batchIndex: 0 }
       if (!listed.hasMore) await bindingService.touchWatermark(input.entityType, { lastSyncedAt: new Date() }, scope)
       return
     }
@@ -640,7 +642,12 @@ function parseExportCursor(raw: string | undefined): { phase: ExportPhase; offse
 function deriveExternalId(record: NormalizedRecord, mapping: DataMapping, keyColumn: string): string | null {
   const field = (mapping.fields ?? []).find((f) => f.externalField === keyColumn)
   if (!field) return null
-  const raw = record.fields[field.localField]
+  // Mirror recordToRow's key resolution so the derived id matches the value written to the row.
+  const isCustom = field.mappingKind === 'custom_field' || field.localField.startsWith('cf:')
+  const key = isCustom
+    ? `cf:${field.localField.startsWith('cf:') ? field.localField.slice(3) : field.localField}`
+    : field.localField
+  const raw = record.fields[key]
   const value = raw == null ? '' : String(raw).trim()
   return value.length > 0 ? value : null
 }
