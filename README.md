@@ -9,7 +9,7 @@ The adapter ships in three increments: **Increment 1** (import + OAuth) is produ
 ## Requirements
 
 - An Open Mercato app on `@open-mercato/core` **0.6.x** or later (the `data_sync` and `integrations` modules must be enabled)
-- Node.js **24** or later (the package uses native fetch and the `using` keyword)
+- Node.js **24** or later (the package builds for the `node24` target and uses native `fetch` and other modern Node APIs)
 - A Google Cloud project with an **OAuth 2.0 Client ID** (Web application type), the **Google Sheets API** enabled, and the **Google Drive API** enabled
 
 ---
@@ -45,7 +45,7 @@ yarn generate
 yarn db:migrate
 ```
 
-`yarn generate` picks up the new module's entities, routes, and navigation entries. `yarn db:migrate` applies the two migrations the module ships (`sync_google_sheets_credentials` and `sync_google_sheets_integrations` tables).
+`yarn generate` picks up the new module's entities, routes, and navigation entries. `yarn db:migrate` applies the migration the module ships, which creates two metadata tables — `sync_google_sheets_bindings` (one row per sheet↔entity binding) and `sync_google_sheets_content_hashes` (the echo-prevention sidecar for bidirectional sync). OAuth tokens are **not** stored in a module-owned table; they live in the framework's integration credential store (see [How It Works](#how-it-works)).
 
 ---
 
@@ -95,7 +95,7 @@ Once installed, navigate to **Settings → Integrations → Google Sheets Sync**
 
 ### 1. Connect a Google account
 
-Click **Connect Google Account**. You will be redirected to Google's OAuth consent screen. After granting access you are redirected back and the module stores an encrypted refresh token (using the app's tenant-data-encryption key, never plaintext).
+Click **Connect Google Account**. You will be redirected to Google's OAuth consent screen. After granting access you are redirected back and the module stores the encrypted OAuth tokens via the framework's integration credential service (`integrationCredentialsService`), encrypted with the app's tenant-data-encryption key — never in plaintext, and never in a module-owned table.
 
 A status chip shows **Connected as user@example.com** when the token is valid. If the token is revoked or expired the chip shows **Reconnect required** — click **Reconnect** to re-initiate the OAuth flow without losing your sheet bindings.
 
@@ -109,9 +109,9 @@ Click **New integration** and fill in:
 | **Tab** | The sheet tab name exactly as it appears in the workbook (case-sensitive). |
 | **Header row** | The row number containing column headers. Usually `1`. |
 | **Data start row** | The first row of data beneath the header. Usually `2`. |
-| **Key column** | The column header whose value uniquely identifies each record. This becomes the external ID stored in the `sync_google_sheets_integrations` run log and is used for upsert matching. |
+| **Key column** | The column header whose value uniquely identifies each record. Its value becomes the record's external ID — used for upsert matching and recorded in the `sync_google_sheets_content_hashes` sidecar for echo prevention. |
 | **Target entity type** | The Open Mercato entity type this sheet maps to (e.g. `customers.person`). An `EntityWriter` for this type must be registered. |
-| **Direction** | `Import only`, `Export only`, or `Bidirectional`. Export and bidirectional require Increment 3 and the `spreadsheets` write scope. |
+| **Direction** | `Import only`, `Export only`, or `Bidirectional`. **Import is production-ready; Export and Bidirectional are experimental and not yet validated end-to-end** — they also require the `spreadsheets` write scope (see [Environment Variables](#environment-variables)). Use them only against non-critical data. |
 | **Conflict policy** | How the adapter resolves a row that has changed on both sides since the last run. See options below. |
 
 ### 3. Confirm the column mapping
@@ -121,16 +121,18 @@ After saving the basic config, click **Preview mapping**. The adapter reads the 
 ### 4. Run or schedule
 
 - Click **Run import now** to trigger a one-shot import immediately.
-- Enable **Scheduled sync** and pick a frequency (hourly / daily / weekly / custom cron) to have the core `SyncSchedule` worker run the import automatically.
+- Enable **Scheduled sync** and pick a frequency (hourly / daily / weekly / custom cron) to have the core `SyncSchedule` worker run the import automatically. *(Scheduled sync is Increment 2 — in progress; see [Increment Status](#increment-status).)*
 
 ### Conflict policies
 
-| Policy | Behaviour |
+Conflict policies apply only to **Bidirectional** sync (experimental). A conflict arises when a row changed on *both* sides since the last run; otherwise the changed side is applied cleanly. The value in parentheses is what is stored in `sync_google_sheets_bindings.conflict_policy`.
+
+| Policy (stored value) | Behaviour |
 |---|---|
-| **Source wins** | The sheet value always overwrites the local record. |
-| **Local wins** | The local record is kept; the conflicting sheet row is skipped for this run. |
-| **Newest wins** | The side with the most recent `updated_at` timestamp is kept. Requires the entity to carry an `updated_at` column. |
-| **Manual review** | The conflict is flagged in the run log and neither side is written until a human resolves it from the admin UI. |
+| **Source wins** (`sheet-wins`) | The sheet value overwrites the local record. |
+| **Local wins** (`mercato-wins`) | The local record is kept; the conflicting sheet row is skipped for this run. |
+| **Newest wins** (`last-write-wins`, default) | The most recently modified side is kept. Google Sheets exposes only a file-level `modifiedTime`, so when timestamps are missing or equal the adapter flags the row rather than guessing. |
+| **Manual review** (`flag-for-review`) | The conflict is flagged and neither side is written until a human resolves it from the admin UI. |
 
 ---
 
@@ -199,15 +201,17 @@ export function registerDi() {
 
 ### Bundled writers
 
-The package ships two built-in writers as opt-in conveniences:
+The package ships one ready-to-register writer plus the factory it is built on:
 
-- **`customers.person`** — A thin writer for the `@open-mercato/core` customers module. Maps common columns (`first_name`, `last_name`, `email`, `phone`) and falls back gracefully for unknown columns by writing them as custom fields.
-- **Generic command-bus writer** — A writer that dispatches a `data_sync.upsert` command on the Open Mercato event bus, letting any module handle the actual persistence via a subscriber. Use this as a starting point when you want decoupled handling.
+- **`customers.person`** (`customersPersonWriter`) — A thin writer for the `@open-mercato/core` customers module. Maps common columns (`first_name`, `last_name`, `email`, `phone`) and falls back gracefully for unknown columns by writing them as custom fields. The module's own `di.ts` registers it automatically on load.
+- **`createCommandBusWriter(config)`** — The generic factory the `customers.person` writer is built on. It dispatches your module's create / update commands on the Open Mercato command bus, letting any module own persistence. Use it as the starting point for your own entity types.
 
-Import them explicitly if you want them:
+`bundledWriters` is the array of ready-to-register instances (currently just `customersPersonWriter`). Register them explicitly if you have disabled auto-registration or simply want to be explicit:
 
 ```ts
 import { bundledWriters } from '@northbound-run/sync-google-sheets/writers'
+import { registerWriter } from '@northbound-run/sync-google-sheets'
+
 bundledWriters.forEach(registerWriter)
 ```
 
@@ -219,7 +223,9 @@ bundledWriters.forEach(registerWriter)
 |---|---|---|
 | **1 — Import + OAuth** | OAuth flow, encrypted token storage, one-shot import, column mapping preview, run log | Production-ready |
 | **2 — Scheduled sync** | Plugs the adapter into the core `SyncSchedule` worker; adds frequency config and next-run display | In progress |
-| **3 — Export + Bidirectional** | Writes from Open Mercato back to the sheet; conflict policy enforcement; bidirectional run loop; the export engine path is first-of-kind within the Data Sync framework | Planned |
+| **3 — Export + Bidirectional** | Writes from Open Mercato back to the sheet; conflict policy enforcement; bidirectional run loop; the export engine path is first-of-kind within the Data Sync framework | Experimental — code shipped, not yet validated |
+
+> ⚠️ **Export and Bidirectional (Increment 3) are experimental.** The write-back / export path ships and is selectable in the config UI, but has **not** been validated end-to-end against a live sheet. Treat it as a preview and use it only against non-critical data until it is marked production-ready.
 
 ---
 
@@ -241,8 +247,8 @@ To publish to a private registry instead, set `publishConfig.registry` to your r
 2. Calls the Google Sheets API via **raw `fetch`** — no `googleapis` SDK, no dependency on `@open-mercato/channel-gmail` or any other package that bundles Google credentials. This keeps the package lean and avoids version coupling.
 3. Parses the response into `NormalizedRecord` objects using the saved column→field mapping.
 4. Calls the registered `EntityWriter.upsert()` for each row and accumulates create / update / skip counts.
-5. Persists a run log entry (timestamp, counts, any per-row errors) to the `sync_google_sheets_integrations` run-log table.
+5. Records the run outcome (timestamp, created / updated / skipped counts, any per-row errors) through the core Data Sync run log.
 
 For export (Increment 3), the flow reverses: the adapter calls `EntityWriter.read()` (or the query engine) for each local record, maps fields back to sheet columns, and writes via the Sheets API `batchUpdate` endpoint.
 
-OAuth tokens are stored encrypted in `sync_google_sheets_credentials` using the same tenant-data-encryption key store as the rest of the framework — access `TENANT_DATA_ENCRYPTION_FALLBACK_KEY` for local development and connect a KMS provider (Vault by default) for production.
+OAuth tokens are stored encrypted through the framework's integration credential service (`integrationCredentialsService`), keyed by the integration id — not in a module-owned table — using the same tenant-data-encryption key store as the rest of the framework. Set `TENANT_DATA_ENCRYPTION_FALLBACK_KEY` for local development and connect a KMS provider (Vault by default) for production.

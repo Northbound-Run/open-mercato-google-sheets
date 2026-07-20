@@ -1,9 +1,10 @@
 {
   "name": "@northbound-run/sync-google-sheets",
   "version": "0.1.0",
-  "description": "Google Sheets ↔ Open Mercato Data Sync adapter: import, scheduled sync, and bidirectional export. Entity-agnostic, reusable, vendorable — hardcoded to no project.",
+  "description": "Google Sheets ↔ Open Mercato Data Sync adapter: production-ready import, plus experimental scheduled sync and bidirectional export. Entity-agnostic and reusable — not tied to any specific project.",
   "type": "module",
   "main": "./dist/index.js",
+  "types": "./src/index.ts",
   "files": [
     "dist",
     "src"
@@ -38,7 +39,10 @@
     "prepack": "node build.mjs"
   },
   "exports": {
-    ".": "./dist/index.js",
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
     "./*.ts": {
       "types": "./src/*.ts",
       "default": "./dist/*.js"
