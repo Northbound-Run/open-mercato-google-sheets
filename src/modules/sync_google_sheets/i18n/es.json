@@ -1,0 +1,89 @@
+{
+  "sync_google_sheets": {
+    "nav": {
+      "title": "Google Sheets Sync"
+    },
+    "connection": {
+      "connect_button": "Connect Google Account",
+      "disconnect_button": "Disconnect",
+      "reconnect_button": "Reconnect",
+      "connected_as": "Connected as {email}",
+      "not_connected": "Not connected",
+      "reconnect_required": "Reconnect required — your access token has expired or been revoked"
+    },
+    "config": {
+      "section_title": "Sheet binding",
+      "spreadsheet_id_label": "Spreadsheet ID or URL",
+      "spreadsheet_id_placeholder": "Paste a Google Sheets URL or bare spreadsheet ID",
+      "tab_label": "Tab (sheet name)",
+      "tab_placeholder": "e.g. Contacts",
+      "header_row_label": "Header row",
+      "header_row_hint": "The row number that contains column headers (usually 1)",
+      "data_start_row_label": "Data start row",
+      "data_start_row_hint": "The first row of data beneath the header",
+      "key_column_label": "Key column",
+      "key_column_hint": "The column whose value uniquely identifies each record (becomes the external ID)",
+      "target_entity_type_label": "Target entity type",
+      "target_entity_type_placeholder": "e.g. customers.person",
+      "direction_label": "Direction",
+      "direction_import": "Import only (sheet → Open Mercato)",
+      "direction_export": "Export only (Open Mercato → sheet)",
+      "direction_bidirectional": "Bidirectional",
+      "conflict_policy_label": "Conflict policy",
+      "conflict_policy_source_wins": "Source wins — remote sheet overwrites local record",
+      "conflict_policy_local_wins": "Local wins — local record is kept, sheet row is skipped",
+      "conflict_policy_newest_wins": "Newest wins — most recently updated side is kept",
+      "conflict_policy_manual": "Manual review — flag conflicts for a human to resolve"
+    },
+    "mapping": {
+      "preview_title": "Suggested column mapping",
+      "preview_description": "Columns detected from the sheet header row. Adjust mappings before running the first sync.",
+      "column_header": "Sheet column",
+      "field_header": "Open Mercato field",
+      "unmapped_badge": "Unmapped",
+      "custom_field_badge": "Custom field",
+      "required_badge": "Required",
+      "no_columns_detected": "No columns could be detected. Verify the spreadsheet ID, tab name, and header row.",
+      "save_mapping_button": "Save mapping"
+    },
+    "actions": {
+      "run_import_button": "Run import now",
+      "run_export_button": "Run export now",
+      "running_label": "Running…",
+      "cancel_button": "Cancel",
+      "save_button": "Save",
+      "delete_integration_button": "Remove integration"
+    },
+    "status": {
+      "last_run_at": "Last run: {datetime}",
+      "never_run": "Never run",
+      "records_synced": "{count} record(s) synced",
+      "run_succeeded": "Sync completed successfully",
+      "run_failed": "Sync failed — see error details below",
+      "run_in_progress": "Sync in progress…"
+    },
+    "schedule": {
+      "section_title": "Scheduled sync",
+      "enabled_label": "Enable scheduled sync",
+      "frequency_label": "Frequency",
+      "frequency_hourly": "Every hour",
+      "frequency_daily": "Daily",
+      "frequency_weekly": "Weekly",
+      "next_run_label": "Next run: {datetime}",
+      "cron_label": "Custom cron expression",
+      "cron_hint": "Standard 5-field UTC cron (e.g. 0 6 * * 1 for every Monday at 06:00 UTC)"
+    },
+    "errors": {
+      "oauth_not_configured": "Google OAuth is not configured. Set GOOGLE_SHEETS_OAUTH_CLIENT_ID and GOOGLE_SHEETS_OAUTH_CLIENT_SECRET in your environment, then restart the app.",
+      "reauth_required": "Your Google session has expired or been revoked. Reconnect your account to resume syncing.",
+      "sheet_unreachable": "The spreadsheet could not be reached. Check that the spreadsheet ID is correct and that the connected account has read access.",
+      "no_writer_registered": "No EntityWriter is registered for entity type “{entityType}”. Register one from your module’s di.ts before running an import.",
+      "invalid_config": "The integration configuration is incomplete or invalid. Check the spreadsheet ID, tab name, header row, key column, and target entity type.",
+      "tab_not_found": "Tab “{tab}” was not found in the spreadsheet. Verify the tab name (it is case-sensitive).",
+      "key_column_missing": "The configured key column “{column}” was not found in the sheet header row.",
+      "export_not_supported": "Export is not yet supported for entity type “{entityType}”. Implement the read() method on its EntityWriter to enable export.",
+      "conflict_unresolved": "A sync conflict was detected for record “{externalId}” and the current conflict policy requires manual resolution.",
+      "unknown": "An unexpected error occurred during sync. Check the server logs for details."
+    }
+  }
+}

@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.yarn/
+.pnp.*
+yarn-error.log
+coverage/
+*.log
+.turbo/
+.DS_Store
+.mercato/
+.omc/
+.env
+.env.local
