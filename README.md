@@ -222,7 +222,7 @@ bundledWriters.forEach(registerWriter)
 | Increment | What it covers | Status |
 |---|---|---|
 | **1 — Import + OAuth** | OAuth flow, encrypted token storage, one-shot import, column mapping preview, run log | Production-ready |
-| **2 — Scheduled sync** | Plugs the adapter into the core `SyncSchedule` worker; adds frequency config and next-run display | In progress |
+| **2 — Scheduled sync** | Provided by the core `data_sync` scheduler — this integration automatically gets a **Sync schedules** tab (cron/interval, next-run). Fired schedules create the same import run as *Run import now*. Requires the app to run the `data_sync` queue + scheduler workers. | **Available via core** (import path production-ready; scheduled runs not independently validated here) |
 | **3 — Export + Bidirectional** | Writes from Open Mercato back to the sheet; conflict policy enforcement; bidirectional run loop; the export engine path is first-of-kind within the Data Sync framework | Experimental — code shipped, not yet validated |
 
 > ⚠️ **Export and Bidirectional (Increment 3) are experimental.** The write-back / export path ships and is selectable in the config UI, but has **not** been validated end-to-end against a live sheet. Treat it as a preview and use it only against non-critical data until it is marked production-ready.
