@@ -40,6 +40,13 @@ export interface EntityWriter {
   entityType: string
   /** Upsert a normalized record; return the local id + resolved action for stats/id-mapping. */
   upsert(record: NormalizedRecord, ctx: WriterContext): Promise<{ id: string; action: WriterAction }>
-  /** Read a local record for export (optional; the adapter falls back to the query engine). */
+  /** Read a local record for export / bidirectional (required for those directions). */
   read?(localId: string, ctx: WriterContext): Promise<NormalizedRecord | null>
+  /**
+   * Optional canonicalization of a record's fields (e.g. lowercase email, trim) so that
+   * sheet-derived and read()-derived content hash identically for equal content. The sync
+   * engine applies it before hashing on both sides (see lib/conflict-detection.ts's
+   * normalization contract). Must be idempotent.
+   */
+  normalize?(fields: Record<string, unknown>): Record<string, unknown>
 }

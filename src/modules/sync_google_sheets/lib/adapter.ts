@@ -175,6 +175,16 @@ export const googleSheetsAdapter: DataSyncAdapter = {
     const policy: ConflictPolicy = isConflictPolicy(binding.conflictPolicy)
       ? binding.conflictPolicy
       : DEFAULT_CONFLICT_POLICY
+    if (enforceConflicts && !writer.read) {
+      throw new Error(
+        `EntityWriter for ${input.entityType} does not implement read(); bidirectional sync needs it to detect Mercato-side changes.`,
+      )
+    }
+    // Hash over the writer's canonical field shape so sheet-derived and read()-derived content
+    // compare equal for equal data (see EntityWriter.normalize).
+    const normalize = writer.normalize
+    const hashFields = (fields: Record<string, unknown>): string =>
+      computeContentHash(normalize ? normalize(fields) : fields)
 
     const credentials = { ...(input.credentials as Record<string, unknown>) }
     const client = createGoogleSheetsClient({
@@ -215,7 +225,7 @@ export const googleSheetsAdapter: DataSyncAdapter = {
       let targetHash: string | null = null
       if (existingLocalId && writer.read) {
         const current = await writer.read(existingLocalId, writerCtx)
-        if (current) targetHash = computeContentHash(current.fields)
+        if (current) targetHash = hashFields(current.fields)
       }
       const baselineHash = await hashService.getBaseline(input.entityType, externalId, scope)
       const decision = decideSync({ policy, writingTo: 'mercato', baselineHash, sourceHash, targetHash })
@@ -275,7 +285,7 @@ export const googleSheetsAdapter: DataSyncAdapter = {
       const items: ImportItem[] = []
       for (const record of valuesToRecords(headers, rows, input.mapping, binding.keyColumn)) {
         try {
-          const sourceHash = computeContentHash(record.fields)
+          const sourceHash = hashFields(record.fields)
           if (enforceConflicts) {
             items.push(await importRowWithConflictCheck(record, sourceHash))
             continue
@@ -375,6 +385,11 @@ export const googleSheetsAdapter: DataSyncAdapter = {
       ? binding.conflictPolicy
       : DEFAULT_CONFLICT_POLICY
     const endCol = columnLetter(Math.max(headers.length, 1))
+    // Hash over the writer's canonical field shape so sheet-derived and read()-derived content
+    // compare equal for equal data (see EntityWriter.normalize).
+    const normalize = writer?.normalize
+    const hashFields = (fields: Record<string, unknown>): string =>
+      computeContentHash(normalize ? normalize(fields) : fields)
 
     // For bidirectional export we need the sheet's *current* content to detect conflicts, so
     // read the full data block once and hash each row (keyed by externalId). Export-only
@@ -385,7 +400,7 @@ export const googleSheetsAdapter: DataSyncAdapter = {
       const dataRange = `${quoteTitle(tab.title)}!A${binding.dataStartRow}:${endCol}${lastDataRow}`
       const dataRows = await client.readValues(binding.spreadsheetId, dataRange)
       for (const sheetRecord of valuesToRecords(headers, dataRows, input.mapping, binding.keyColumn)) {
-        sheetHashByExternalId.set(sheetRecord.externalId, computeContentHash(sheetRecord.fields))
+        sheetHashByExternalId.set(sheetRecord.externalId, hashFields(sheetRecord.fields))
       }
     }
 
@@ -427,7 +442,7 @@ export const googleSheetsAdapter: DataSyncAdapter = {
           results.push({ localId, externalId, status: 'skipped', error: 'no local record' })
           continue
         }
-        const sourceHash = computeContentHash(record.fields)
+        const sourceHash = hashFields(record.fields)
         const baselineHash = await hashService.getBaseline(input.entityType, externalId, scope)
 
         const decision: SyncDecision = enforceConflicts

@@ -122,6 +122,16 @@ async function readPerson(localId: string, ctx: WriterContext): Promise<Normaliz
   return { externalId: '', fields }
 }
 
+// Canonicalize person fields so a sheet-derived record and a read()-derived record hash
+// identically for equal content — the customers command lowercases email on write, so mirror
+// that here (otherwise a mixed-case sheet email would look "changed" on every sync). Idempotent.
+function normalizePersonFields(fields: Record<string, unknown>): Record<string, unknown> {
+  const email = fields.email
+  if (typeof email !== 'string') return fields
+  const canonical = email.trim().toLowerCase()
+  return canonical === email ? fields : { ...fields, email: canonical }
+}
+
 export const customersPersonWriter: EntityWriter = createCommandBusWriter({
   entityType: CUSTOMERS_PERSON_ENTITY_TYPE,
   createCommand: 'customers.people.create',
@@ -129,6 +139,7 @@ export const customersPersonWriter: EntityWriter = createCommandBusWriter({
   buildCreateInput,
   buildUpdateInput,
   readRecord: readPerson,
+  normalizeFields: normalizePersonFields,
   // customers.people.create returns { result: { entityId, personId } }; entityId is the
   // customer_entity local id we map the external id to. The default extractor reads it.
 })

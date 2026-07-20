@@ -30,6 +30,11 @@ export type CommandBusWriterConfig = {
    * throws for its entity type.
    */
   readRecord?: (localId: string, ctx: WriterContext) => Promise<NormalizedRecord | null>
+  /**
+   * Optional field canonicalization (see EntityWriter.normalize). Applied by the sync engine
+   * before hashing so both sync directions compare equal content equally. Must be idempotent.
+   */
+  normalizeFields?: (fields: Record<string, unknown>) => Record<string, unknown>
 }
 
 function pluralizeEntity(entity: string): string {
@@ -112,6 +117,7 @@ export function createCommandBusWriter(config: CommandBusWriterConfig): EntityWr
     },
   }
   if (config.readRecord) writer.read = config.readRecord
+  if (config.normalizeFields) writer.normalize = config.normalizeFields
   return writer
 }
 
