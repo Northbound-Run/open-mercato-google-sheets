@@ -16,6 +16,8 @@ import type {
 import { SyncExternalIdMapping } from '@open-mercato/core/modules/integrations/data/entities'
 import { SYNC_GOOGLE_SHEETS_INTEGRATION_ID, createSheetBindingService, type BindingScope } from './config'
 import { createContentHashService, computeContentHash } from './content-hash'
+import { decideSync, type SyncDecision } from './conflict-detection'
+import { DEFAULT_CONFLICT_POLICY, isConflictPolicy, type ConflictPolicy } from './conflict'
 import { loadSheetMapping, rowToRecord, valuesToRecords } from './mapping'
 import {
   buildA1Range,
@@ -166,9 +168,13 @@ export const googleSheetsAdapter: DataSyncAdapter = {
     if (!binding) throw new Error(`No Google Sheets binding configured for ${input.entityType}.`)
     const writer = requireWriter(input.entityType)
     const scope: BindingScope = input.scope
-    // Hash bookkeeping (echo prevention) only matters when the sheet is also an export
-    // target. Import-only bindings do a lean full-scan upsert with no hash overhead.
-    const trackHashes = binding.direction !== 'import'
+    // Conflict detection (and its baseline bookkeeping) only applies to bidirectional
+    // bindings — a one-way import has no export side to conflict with, so it does a lean
+    // full-scan upsert with no per-row read/hash overhead.
+    const enforceConflicts = binding.direction === 'bidirectional'
+    const policy: ConflictPolicy = isConflictPolicy(binding.conflictPolicy)
+      ? binding.conflictPolicy
+      : DEFAULT_CONFLICT_POLICY
 
     const credentials = { ...(input.credentials as Record<string, unknown>) }
     const client = createGoogleSheetsClient({
@@ -191,6 +197,64 @@ export const googleSheetsAdapter: DataSyncAdapter = {
       entityType: input.entityType,
     }
 
+    // Bidirectional import: reconcile each incoming sheet row against the current Mercato
+    // state and the last-synced baseline before writing, honouring the binding's conflict
+    // policy. The baseline is advanced only after a successful write (write-then-record),
+    // and the scheduler prevents overlapping same-direction runs — so no cross-run TOCTOU.
+    const importRowWithConflictCheck = async (
+      record: NormalizedRecord,
+      sourceHash: string,
+    ): Promise<ImportItem> => {
+      const externalId = record.externalId
+      const existingLocalId = await externalIdMappingService.lookupLocalId(
+        SYNC_GOOGLE_SHEETS_INTEGRATION_ID,
+        input.entityType,
+        externalId,
+        input.scope,
+      )
+      let targetHash: string | null = null
+      if (existingLocalId && writer.read) {
+        const current = await writer.read(existingLocalId, writerCtx)
+        if (current) targetHash = computeContentHash(current.fields)
+      }
+      const baselineHash = await hashService.getBaseline(input.entityType, externalId, scope)
+      const decision = decideSync({ policy, writingTo: 'mercato', baselineHash, sourceHash, targetHash })
+
+      if (decision.outcome === 'flag') {
+        return {
+          externalId,
+          action: 'failed',
+          data: { errorMessage: `sync conflict flagged for manual review (${decision.reason})` },
+        }
+      }
+      if (decision.outcome === 'skip') {
+        if (decision.nextBaseline) {
+          await hashService.setBaseline(input.entityType, externalId, decision.nextBaseline, scope)
+        }
+        return {
+          externalId,
+          action: 'skip',
+          data: { localId: existingLocalId ?? null, reason: decision.reason },
+          hash: sourceHash,
+        }
+      }
+      // apply: write the sheet's version into Mercato, then advance the baseline.
+      const { id, action } = await writer.upsert(record, writerCtx)
+      if (action !== 'skip') {
+        await externalIdMappingService.storeExternalIdMapping(
+          SYNC_GOOGLE_SHEETS_INTEGRATION_ID,
+          input.entityType,
+          id,
+          externalId,
+          input.scope,
+        )
+      }
+      if (decision.nextBaseline) {
+        await hashService.setBaseline(input.entityType, externalId, decision.nextBaseline, scope)
+      }
+      return { externalId, action, data: { localId: id }, hash: sourceHash }
+    }
+
     const startCursor = input.cursor ? safeParseImportRowOffset(input.cursor) : 0
     let rowOffset = startCursor
     let batchIndex = 0
@@ -211,7 +275,12 @@ export const googleSheetsAdapter: DataSyncAdapter = {
       const items: ImportItem[] = []
       for (const record of valuesToRecords(headers, rows, input.mapping, binding.keyColumn)) {
         try {
-          const hash = computeContentHash(record.fields)
+          const sourceHash = computeContentHash(record.fields)
+          if (enforceConflicts) {
+            items.push(await importRowWithConflictCheck(record, sourceHash))
+            continue
+          }
+          // Import-only binding: no export side, so no conflict is possible — blind upsert.
           const { id, action } = await writer.upsert(record, writerCtx)
           if (action !== 'skip') {
             await externalIdMappingService.storeExternalIdMapping(
@@ -221,9 +290,8 @@ export const googleSheetsAdapter: DataSyncAdapter = {
               record.externalId,
               input.scope,
             )
-            if (trackHashes) await hashService.record(input.entityType, record.externalId, 'import', hash, scope)
           }
-          items.push({ externalId: record.externalId, action, data: { localId: id }, hash })
+          items.push({ externalId: record.externalId, action, data: { localId: id }, hash: sourceHash })
         } catch (error) {
           items.push({
             externalId: record.externalId,
@@ -255,11 +323,12 @@ export const googleSheetsAdapter: DataSyncAdapter = {
     )
   },
 
-  // FIRST-OF-KIND export path (R1). The Data Sync engine's runExport has never been
-  // exercised by a shipped adapter — validate with the Increment 3 spike before relying on
-  // it in production. Exports records that already have an id-mapping (the bidirectional
-  // update case); brand-new Mercato records without a mapping are a documented follow-up
-  // (they require per-entity enumeration the generic core can't provide).
+  // Export path. Reconciles each mapped record against the sheet's current content and the
+  // last-synced baseline (bidirectional honours the conflict policy; export-only treats
+  // Mercato as the source of truth, skipping no-ops), then batch-writes the winners. Still
+  // needs end-to-end validation against a live sheet. Only records that already have an
+  // id-mapping are exported (the update case); brand-new Mercato records without a mapping
+  // are a documented follow-up (they need per-entity enumeration the generic core can't provide).
   async *streamExport(input: StreamExportInput): AsyncIterable<ExportBatch> {
     const container = await createRequestContainer()
     const em = container.resolve('em') as EntityManager
@@ -288,7 +357,9 @@ export const googleSheetsAdapter: DataSyncAdapter = {
     const keyColumnIndex = headers.indexOf(binding.keyColumn)
     if (keyColumnIndex < 0) throw new Error(`Key column "${binding.keyColumn}" not found in sheet header.`)
 
-    // Build externalId -> sheet row number index from the key column.
+    // Index the current sheet rows: externalId -> row number (where to write), and, for
+    // bidirectional bindings, externalId -> current content hash (to detect whether the
+    // sheet side changed since the last sync).
     const keyColLetter = columnLetter(keyColumnIndex + 1)
     const keyRange = `${quoteTitle(tab.title)}!${keyColLetter}${binding.dataStartRow}:${keyColLetter}`
     const keyValues = await client.readValues(binding.spreadsheetId, keyRange)
@@ -298,6 +369,25 @@ export const googleSheetsAdapter: DataSyncAdapter = {
       if (key) rowByExternalId.set(key, binding.dataStartRow + i)
     })
     let appendRow = binding.dataStartRow + keyValues.length
+
+    const enforceConflicts = binding.direction === 'bidirectional'
+    const policy: ConflictPolicy = isConflictPolicy(binding.conflictPolicy)
+      ? binding.conflictPolicy
+      : DEFAULT_CONFLICT_POLICY
+    const endCol = columnLetter(Math.max(headers.length, 1))
+
+    // For bidirectional export we need the sheet's *current* content to detect conflicts, so
+    // read the full data block once and hash each row (keyed by externalId). Export-only
+    // treats Mercato as the source of truth and never inspects the sheet's content.
+    const sheetHashByExternalId = new Map<string, string>()
+    if (enforceConflicts && keyValues.length > 0) {
+      const lastDataRow = binding.dataStartRow + keyValues.length - 1
+      const dataRange = `${quoteTitle(tab.title)}!A${binding.dataStartRow}:${endCol}${lastDataRow}`
+      const dataRows = await client.readValues(binding.spreadsheetId, dataRange)
+      for (const sheetRecord of valuesToRecords(headers, dataRows, input.mapping, binding.keyColumn)) {
+        sheetHashByExternalId.set(sheetRecord.externalId, computeContentHash(sheetRecord.fields))
+      }
+    }
 
     // Export candidates: records this integration already mapped, paged by cursor offset.
     const offset = input.cursor ? safeParseExportOffset(input.cursor) : 0
@@ -325,6 +415,9 @@ export const googleSheetsAdapter: DataSyncAdapter = {
 
     const results: ExportItemResult[] = []
     const updates: Array<{ range: string; values: unknown[][] }> = []
+    // Baselines to advance only after the batched sheet write actually lands.
+    const pendingBaselines: Array<{ externalId: string; hash: string }> = []
+
     for (const mappingRow of mappings) {
       const localId = mappingRow.internalEntityId
       const externalId = mappingRow.externalId
@@ -334,20 +427,47 @@ export const googleSheetsAdapter: DataSyncAdapter = {
           results.push({ localId, externalId, status: 'skipped', error: 'no local record' })
           continue
         }
-        const hash = computeContentHash(record.fields)
-        // Echo prevention: skip when the sheet already holds what we last exported.
-        if (await hashService.isEcho(input.entityType, externalId, 'export', hash, scope)) {
-          results.push({ localId, externalId, status: 'skipped', error: 'unchanged (echo)' })
+        const sourceHash = computeContentHash(record.fields)
+        const baselineHash = await hashService.getBaseline(input.entityType, externalId, scope)
+
+        const decision: SyncDecision = enforceConflicts
+          ? decideSync({
+              policy,
+              writingTo: 'sheet',
+              baselineHash,
+              sourceHash,
+              targetHash: sheetHashByExternalId.get(externalId) ?? null,
+            })
+          : // Export-only: Mercato is the source of truth — overwrite the sheet, skip no-ops.
+            sourceHash === baselineHash
+            ? { outcome: 'skip', reason: 'unchanged', nextBaseline: baselineHash }
+            : { outcome: 'apply', reason: 'export-overwrite', nextBaseline: sourceHash }
+
+        if (decision.outcome === 'flag') {
+          results.push({
+            localId,
+            externalId,
+            status: 'error',
+            error: `sync conflict flagged for manual review (${decision.reason})`,
+          })
           continue
         }
+        if (decision.outcome === 'skip') {
+          // No sheet write to wait on — safe to advance the baseline now if requested.
+          if (decision.nextBaseline) {
+            await hashService.setBaseline(input.entityType, externalId, decision.nextBaseline, scope)
+          }
+          results.push({ localId, externalId, status: 'skipped', error: decision.reason })
+          continue
+        }
+        // apply: queue the row write; defer the baseline until the batch write lands.
         const rowValues = recordToRow(headers, record, input.mapping)
         const targetRow = rowByExternalId.get(externalId) ?? appendRow++
-        const endCol = columnLetter(Math.max(headers.length, 1))
         updates.push({
           range: `${quoteTitle(tab.title)}!A${targetRow}:${endCol}${targetRow}`,
           values: [rowValues],
         })
-        await hashService.record(input.entityType, externalId, 'export', hash, scope)
+        pendingBaselines.push({ externalId, hash: decision.nextBaseline ?? sourceHash })
         results.push({ localId, externalId, status: 'success' })
       } catch (error) {
         results.push({
@@ -361,6 +481,10 @@ export const googleSheetsAdapter: DataSyncAdapter = {
 
     if (updates.length > 0) {
       await client.batchUpdateValues(binding.spreadsheetId, updates)
+      // The sheet write landed — now advance the baselines for the rows we wrote.
+      for (const { externalId, hash } of pendingBaselines) {
+        await hashService.setBaseline(input.entityType, externalId, hash, scope)
+      }
     }
 
     const hasMore = mappings.length >= input.batchSize

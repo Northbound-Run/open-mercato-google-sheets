@@ -22,6 +22,14 @@ export type CommandBusWriterConfig = {
   extractLocalId?: (result: CommandExecutionResult) => string | null
   /** Optional secondary dedupe (e.g. by email) when id-mapping has no hit. */
   resolveExistingLocalId?: (record: NormalizedRecord, ctx: WriterContext) => Promise<string | null>
+  /**
+   * Optional read() for export / bidirectional: given a local id, return the entity's current
+   * content as a NormalizedRecord. MUST surface fields in the same normalized shape upsert()
+   * consumes (see the normalization contract in lib/conflict-detection.ts) so content hashes
+   * are comparable across sync directions. When omitted, the writer has no read() and export
+   * throws for its entity type.
+   */
+  readRecord?: (localId: string, ctx: WriterContext) => Promise<NormalizedRecord | null>
 }
 
 function pluralizeEntity(entity: string): string {
@@ -58,7 +66,7 @@ export function createCommandBusWriter(config: CommandBusWriterConfig): EntityWr
   const updateCommand = config.updateCommand ?? guessed.update
   const extractLocalId = config.extractLocalId ?? defaultExtractLocalId
 
-  return {
+  const writer: EntityWriter = {
     entityType: config.entityType,
     async upsert(record, ctx) {
       const commandBus = ctx.container.resolve('commandBus') as CommandBus
@@ -103,6 +111,8 @@ export function createCommandBusWriter(config: CommandBusWriterConfig): EntityWr
       return { id, action: 'create' }
     },
   }
+  if (config.readRecord) writer.read = config.readRecord
+  return writer
 }
 
 /** Split `record.fields` into base values (bare keys) and custom fields (cf:-prefixed keys). */

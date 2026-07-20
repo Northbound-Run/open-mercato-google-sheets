@@ -1,4 +1,5 @@
-import type { EntityWriter, NormalizedRecord, SyncScope } from './types'
+import type { QueryEngine } from '@open-mercato/shared/lib/query/types'
+import type { EntityWriter, NormalizedRecord, SyncScope, WriterContext } from './types'
 import { createCommandBusWriter, pickField, splitFields } from './command-bus-writer'
 
 // Bundled worked example: a writer for `customers.person`, built on the generic
@@ -78,12 +79,56 @@ function buildUpdateInput(localId: string, record: NormalizedRecord, _scope: Syn
   }
 }
 
+// Best-effort read() for export / bidirectional. Reverses buildCreateInput: fetches the
+// person by local id via the query engine and surfaces the common fields under the same slugs
+// the import path maps to. Best-effort + live-validate — the query-index field names and
+// value canonicalization (e.g. email casing) must line up with the sheet mapping for conflict
+// and echo detection to be exact (see lib/conflict-detection.ts's normalization contract).
+async function readPerson(localId: string, ctx: WriterContext): Promise<NormalizedRecord | null> {
+  const queryEngine = ctx.container.resolve('queryEngine') as QueryEngine
+  const entityId = ctx.entityType.replace('.', ':') // 'customers.person' -> 'customers:person'
+  const res = await queryEngine.query<Record<string, unknown>>(entityId, {
+    tenantId: ctx.scope.tenantId,
+    organizationId: ctx.scope.organizationId,
+    filters: { id: { $eq: localId } },
+    page: { page: 1, pageSize: 1 },
+  })
+  const row = res.items[0]
+  if (!row) return null
+
+  const pick = (...keys: string[]): unknown => {
+    for (const key of keys) {
+      const value = row[key]
+      if (value !== null && value !== undefined && value !== '') return value
+    }
+    return undefined
+  }
+  const fields: Record<string, unknown> = {}
+  const set = (key: string, value: unknown): void => {
+    if (value !== null && value !== undefined && value !== '') fields[key] = value
+  }
+  set('first_name', pick('first_name', 'firstName'))
+  set('last_name', pick('last_name', 'lastName'))
+  set('display_name', pick('display_name', 'displayName', 'name'))
+  set('email', pick('primary_email', 'primaryEmail', 'email'))
+  set('phone', pick('primary_phone', 'primaryPhone', 'phone'))
+  set('job_title', pick('job_title', 'jobTitle', 'title'))
+  set('status', pick('status'))
+  set('source', pick('source'))
+  set('description', pick('description', 'notes'))
+
+  // externalId is owned by the sync layer (the id-mapping), not the writer — the adapter uses
+  // the mapping's externalId, and content hashing reads only `fields`.
+  return { externalId: '', fields }
+}
+
 export const customersPersonWriter: EntityWriter = createCommandBusWriter({
   entityType: CUSTOMERS_PERSON_ENTITY_TYPE,
   createCommand: 'customers.people.create',
   updateCommand: 'customers.people.update',
   buildCreateInput,
   buildUpdateInput,
+  readRecord: readPerson,
   // customers.people.create returns { result: { entityId, personId } }; entityId is the
   // customer_entity local id we map the external id to. The default extractor reads it.
 })

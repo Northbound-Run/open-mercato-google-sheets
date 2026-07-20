@@ -27,8 +27,8 @@ export type HashDirection = 'import' | 'export' | 'baseline'
  * Stores content hashes for a record keyed by direction. The 'baseline' hash is the crux of
  * two-way conflict detection: it records the content both sides agreed on at the last sync,
  * so each side can be classified as changed/unchanged by diffing its current hash against it.
- * Read + write are the caller's responsibility to wrap in withAtomicFlush when they must be
- * atomic with the target write.
+ * The caller advances the baseline only after the target write lands (write-then-record), and
+ * the core scheduler serializes same-direction runs, so no explicit locking is needed.
  */
 export function createContentHashService(em: EntityManager) {
   async function find(entityType: string, externalId: string, direction: HashDirection, scope: BindingScope) {

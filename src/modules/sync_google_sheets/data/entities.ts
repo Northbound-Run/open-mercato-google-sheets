@@ -88,11 +88,12 @@ export class GoogleSheetsBinding {
 }
 
 /**
- * Echo-prevention sidecar. On import/export we record the content hash this module last
- * wrote to a given side (direction) for a record. Before writing, we compare the target's
- * current hash to the last value we wrote; a match means our own earlier write is echoing
- * back, so we skip it and import↔export don't ping-pong. Hash-check + write happen inside a
- * withAtomicFlush boundary to avoid TOCTOU races.
+ * Conflict-detection sidecar. Stores, per record, the 'baseline' content hash both sides
+ * shared at the last successful sync — the common ancestor the sync engine diffs each side
+ * against to classify it changed/unchanged (see lib/conflict-detection.ts). This subsumes
+ * echo prevention: an unchanged side equals the baseline and is skipped. The baseline is
+ * advanced only after a write actually lands (write-then-record), and the core scheduler
+ * prevents overlapping same-direction runs, so there is no cross-run race to guard.
  */
 @Entity({ tableName: 'sync_google_sheets_content_hashes' })
 @Index({
