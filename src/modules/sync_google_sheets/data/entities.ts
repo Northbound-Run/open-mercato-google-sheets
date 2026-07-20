@@ -115,9 +115,13 @@ export class GoogleSheetsContentHash {
   @Property({ name: 'external_id', type: 'text' })
   externalId!: string
 
-  /** Which side this module last wrote: 'import' -> wrote Mercato, 'export' -> wrote the sheet. */
+  /**
+   * Row kind. 'baseline' -> the content both sides shared at the last successful sync (the
+   * common ancestor used for conflict detection). 'import'/'export' -> legacy per-side echo
+   * hashes. The column is free-text, so new kinds need no migration.
+   */
   @Property({ name: 'direction', type: 'text' })
-  direction!: 'import' | 'export'
+  direction!: 'import' | 'export' | 'baseline'
 
   @Property({ name: 'content_hash', type: 'text' })
   contentHash!: string

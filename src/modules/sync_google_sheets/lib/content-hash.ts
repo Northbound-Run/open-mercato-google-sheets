@@ -19,12 +19,16 @@ export function computeContentHash(fields: Record<string, unknown>): string {
   return createHash('sha256').update(stableStringify(fields)).digest('hex')
 }
 
-export type HashDirection = 'import' | 'export'
+// 'baseline' is the content both sides shared at the last successful sync (the common
+// ancestor for conflict detection). 'import'/'export' remain for legacy per-side echo hashes.
+export type HashDirection = 'import' | 'export' | 'baseline'
 
 /**
- * Tracks the content hash this module last wrote to each side of a record, so an import
- * doesn't re-emit a value we just exported (and vice versa). Read + write are the caller's
- * responsibility to wrap in withAtomicFlush when they must be atomic with the target write.
+ * Stores content hashes for a record keyed by direction. The 'baseline' hash is the crux of
+ * two-way conflict detection: it records the content both sides agreed on at the last sync,
+ * so each side can be classified as changed/unchanged by diffing its current hash against it.
+ * Read + write are the caller's responsibility to wrap in withAtomicFlush when they must be
+ * atomic with the target write.
  */
 export function createContentHashService(em: EntityManager) {
   async function find(entityType: string, externalId: string, direction: HashDirection, scope: BindingScope) {
@@ -94,6 +98,25 @@ export function createContentHashService(em: EntityManager) {
         tenantId: scope.tenantId,
       })
       await em.persist(created).flush()
+    },
+
+    /** Read the baseline (last-agreed-sync) hash for a record, or null if never synced. */
+    async getBaseline(
+      entityType: string,
+      externalId: string,
+      scope: BindingScope,
+    ): Promise<string | null> {
+      return this.getLastHash(entityType, externalId, 'baseline', scope)
+    },
+
+    /** Advance the baseline to the content both sides now agree on. */
+    async setBaseline(
+      entityType: string,
+      externalId: string,
+      contentHash: string,
+      scope: BindingScope,
+    ): Promise<void> {
+      return this.record(entityType, externalId, 'baseline', contentHash, scope)
     },
   }
 }
