@@ -49,4 +49,14 @@ export interface EntityWriter {
    * normalization contract). Must be idempotent.
    */
   normalize?(fields: Record<string, unknown>): Record<string, unknown>
+  /**
+   * Optional enumeration for new-record export: page through this entity's records so the
+   * adapter can push records created in Mercato that have no sheet row yet. Each item pairs a
+   * local id with its NormalizedRecord, keyed the same way read()/upsert use (so hashing and
+   * mapping stay consistent). When omitted, only already-mapped records are exported (updates).
+   */
+  list?(
+    ctx: WriterContext,
+    page: { offset: number; limit: number },
+  ): Promise<{ items: Array<{ localId: string; record: NormalizedRecord }>; hasMore: boolean }>
 }

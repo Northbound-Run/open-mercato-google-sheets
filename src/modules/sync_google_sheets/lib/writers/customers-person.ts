@@ -79,23 +79,12 @@ function buildUpdateInput(localId: string, record: NormalizedRecord, _scope: Syn
   }
 }
 
-// Best-effort read() for export / bidirectional. Reverses buildCreateInput: fetches the
-// person by local id via the query engine and surfaces the common fields under the same slugs
-// the import path maps to. Best-effort + live-validate — the query-index field names and
+// Map a query-engine person row to a NormalizedRecord, keyed by the same slugs the import path
+// maps to. externalId is owned by the sync layer (the id-mapping), so it's blank here; content
+// hashing reads only `fields`. Best-effort + live-validate: the query-index field names and
 // value canonicalization (e.g. email casing) must line up with the sheet mapping for conflict
 // and echo detection to be exact (see lib/conflict-detection.ts's normalization contract).
-async function readPerson(localId: string, ctx: WriterContext): Promise<NormalizedRecord | null> {
-  const queryEngine = ctx.container.resolve('queryEngine') as QueryEngine
-  const entityId = ctx.entityType.replace('.', ':') // 'customers.person' -> 'customers:person'
-  const res = await queryEngine.query<Record<string, unknown>>(entityId, {
-    tenantId: ctx.scope.tenantId,
-    organizationId: ctx.scope.organizationId,
-    filters: { id: { $eq: localId } },
-    page: { page: 1, pageSize: 1 },
-  })
-  const row = res.items[0]
-  if (!row) return null
-
+function personRowToRecord(row: Record<string, unknown>): NormalizedRecord {
   const pick = (...keys: string[]): unknown => {
     for (const key of keys) {
       const value = row[key]
@@ -116,10 +105,43 @@ async function readPerson(localId: string, ctx: WriterContext): Promise<Normaliz
   set('status', pick('status'))
   set('source', pick('source'))
   set('description', pick('description', 'notes'))
-
-  // externalId is owned by the sync layer (the id-mapping), not the writer — the adapter uses
-  // the mapping's externalId, and content hashing reads only `fields`.
   return { externalId: '', fields }
+}
+
+const personEntityId = (ctx: WriterContext): string => ctx.entityType.replace('.', ':') // customers.person -> customers:person
+
+// read() for export / bidirectional: fetch one person by local id.
+async function readPerson(localId: string, ctx: WriterContext): Promise<NormalizedRecord | null> {
+  const queryEngine = ctx.container.resolve('queryEngine') as QueryEngine
+  const res = await queryEngine.query<Record<string, unknown>>(personEntityId(ctx), {
+    tenantId: ctx.scope.tenantId,
+    organizationId: ctx.scope.organizationId,
+    filters: { id: { $eq: localId } },
+    page: { page: 1, pageSize: 1 },
+  })
+  const row = res.items[0]
+  return row ? personRowToRecord(row) : null
+}
+
+// list() for new-record export: page through people so records created in Mercato (no sheet
+// row yet) can be pushed to the sheet.
+async function listPeople(
+  ctx: WriterContext,
+  page: { offset: number; limit: number },
+): Promise<{ items: Array<{ localId: string; record: NormalizedRecord }>; hasMore: boolean }> {
+  const queryEngine = ctx.container.resolve('queryEngine') as QueryEngine
+  const pageSize = Math.max(page.limit, 1)
+  const pageNum = Math.floor(page.offset / pageSize) + 1
+  const res = await queryEngine.query<Record<string, unknown>>(personEntityId(ctx), {
+    tenantId: ctx.scope.tenantId,
+    organizationId: ctx.scope.organizationId,
+    page: { page: pageNum, pageSize },
+  })
+  const items = res.items.flatMap((row) => {
+    const localId = typeof row.id === 'string' ? row.id : null
+    return localId ? [{ localId, record: personRowToRecord(row) }] : []
+  })
+  return { items, hasMore: res.items.length >= pageSize }
 }
 
 // Canonicalize person fields so a sheet-derived record and a read()-derived record hash
@@ -140,6 +162,7 @@ export const customersPersonWriter: EntityWriter = createCommandBusWriter({
   buildUpdateInput,
   readRecord: readPerson,
   normalizeFields: normalizePersonFields,
+  listRecords: listPeople,
   // customers.people.create returns { result: { entityId, personId } }; entityId is the
   // customer_entity local id we map the external id to. The default extractor reads it.
 })
