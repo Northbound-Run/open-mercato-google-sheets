@@ -225,12 +225,11 @@ bundledWriters.forEach(registerWriter)
 
 ## Publishing
 
-This package is scoped to `@northbound-run/` and `publishConfig.access` is set to `"restricted"` in `package.json`. Before running `npm publish`:
+This package is scoped to `@northbound-run/` and publishes to the public npm registry — `publishConfig.access` is `"public"` in `package.json`, so anyone can install it without an npm auth token.
 
-- **Public npm**: change `publishConfig.access` to `"public"`. Anyone will be able to install it without an npm auth token.
-- **Private registry**: set `publishConfig.registry` to your registry URL (Verdaccio, GitHub Packages, AWS CodeArtifact, etc.) and keep `access: "restricted"`.
+To publish to a private registry instead, set `publishConfig.registry` to your registry URL (Verdaccio, GitHub Packages, AWS CodeArtifact, etc.) and change `access` back to `"restricted"`.
 
-The package does not use a build step for publication — `dist/` is produced by `yarn build` (esbuild via `build.mjs`) and committed to the release tag, not tracked in the working tree.
+`dist/` is `.gitignore`d (not tracked in the working tree) but **is** shipped in the published tarball: the `files` field lists `dist` and `src`, and the `prepack` script runs the esbuild build (`build.mjs`) automatically before `npm pack` / `npm publish`, so a fresh `dist/` is always included. The raw `src/*.ts` ships too because the `exports` map resolves TypeScript types from source.
 
 ---
 

@@ -4,13 +4,38 @@
   "description": "Google Sheets ↔ Open Mercato Data Sync adapter: import, scheduled sync, and bidirectional export. Entity-agnostic, reusable, vendorable — hardcoded to no project.",
   "type": "module",
   "main": "./dist/index.js",
+  "files": [
+    "dist",
+    "src"
+  ],
   "license": "MIT",
   "author": "Northbound",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Northbound-Run/open-mercato-google-sheets.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Northbound-Run/open-mercato-google-sheets/issues"
+  },
+  "homepage": "https://github.com/Northbound-Run/open-mercato-google-sheets#readme",
+  "keywords": [
+    "open-mercato",
+    "google-sheets",
+    "data-sync",
+    "oauth",
+    "integration",
+    "bidirectional-sync",
+    "etl"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
   "packageManager": "yarn@4.12.0",
   "scripts": {
     "build": "node build.mjs",
     "test": "jest --config jest.config.cjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepack": "node build.mjs"
   },
   "exports": {
     ".": "./dist/index.js",
@@ -103,6 +128,6 @@
     "zod": "^4.3.6"
   },
   "publishConfig": {
-    "access": "restricted"
+    "access": "public"
   }
 }
