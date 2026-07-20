@@ -28,6 +28,7 @@ import {
   type SpreadsheetMeta,
 } from './sheets-client'
 import { getValidAccessToken, DEFAULT_EXPORT_SCOPES } from './oauth'
+import { createServiceAccountTokenProvider, resolveServiceAccountCredentials } from './service-account'
 import { getWriter, listWriterEntityTypes, requireWriter } from './writers/registry'
 import type { NormalizedRecord, WriterContext } from './writers/types'
 
@@ -48,12 +49,20 @@ function toCoverageEntityId(entityType: string): string {
   return entityType.replace('.', ':')
 }
 
-/** Build an access-token provider bound to the run's stored credentials, persisting refreshes. */
+/**
+ * Build an access-token provider bound to the run's stored credentials. Service-account
+ * credentials (blob or env) mint tokens directly from the SA key — no refresh or persist;
+ * otherwise fall back to the OAuth refresh-token path, persisting refreshed tokens.
+ */
 function buildAccessTokenProvider(
   credentials: Record<string, unknown>,
   scope: TenantScope,
   credentialsService: CredentialsService,
 ): AccessTokenProvider {
+  const serviceAccount = resolveServiceAccountCredentials(credentials)
+  if (serviceAccount) {
+    return createServiceAccountTokenProvider({ credentials: serviceAccount })
+  }
   return async (opts) =>
     getValidAccessToken({
       credentials,

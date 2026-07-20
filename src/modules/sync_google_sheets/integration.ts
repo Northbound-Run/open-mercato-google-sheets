@@ -57,6 +57,26 @@ export const integration: IntegrationDefinition = {
         helpText:
           'Optional. Defaults to spreadsheets.readonly + drive.metadata.readonly + userinfo.email (import). Include https://www.googleapis.com/auth/spreadsheets to enable export, then reconnect.',
       },
+      // Service-account auth (app-owned sheets): fill these INSTEAD of the OAuth fields. When a
+      // client email + private key are present the adapter uses the service account and skips
+      // the OAuth connect flow entirely. The target spreadsheet must be shared with this email.
+      {
+        key: 'clientEmail',
+        label: 'Service account email (optional — app-owned sheets)',
+        type: 'text',
+        required: false,
+        placeholder: 'sync@my-project.iam.gserviceaccount.com',
+        helpText:
+          'Optional. Use a Google service account instead of OAuth. Share the target spreadsheet with this address, then provide this together with the private key to switch this integration to service-account auth.',
+      },
+      {
+        key: 'privateKey',
+        label: 'Service account private key (PEM, optional)',
+        type: 'secret',
+        required: false,
+        helpText:
+          "Optional. The service account key's private_key (PEM, including the BEGIN/END lines). Stored encrypted. Required alongside the email to use service-account auth.",
+      },
     ],
   },
   healthCheck: { service: 'googleSheetsHealthCheck' },
