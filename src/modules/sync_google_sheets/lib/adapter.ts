@@ -19,6 +19,7 @@ import { createContentHashService, computeContentHash } from './content-hash'
 import { decideSync, type SyncDecision } from './conflict-detection'
 import { DEFAULT_CONFLICT_POLICY, isConflictPolicy, type ConflictPolicy } from './conflict'
 import { loadSheetMapping, rowToRecord, valuesToRecords } from './mapping'
+import { deriveExternalId, recordToRow } from './row-mapping'
 import {
   buildA1Range,
   createGoogleSheetsClient,
@@ -98,23 +99,6 @@ async function readHeaderRow(
   })
   const values = await client.readValues(spreadsheetId, range)
   return (values[0] ?? []).map((v) => String(v ?? '').trim())
-}
-
-/** Map a normalized record back to a sheet row, column order following the header row. */
-function recordToRow(headers: string[], record: NormalizedRecord, mapping: DataMapping): unknown[] {
-  return headers.map((header) => {
-    const field = (mapping.fields ?? []).find((f) => f.externalField === header)
-    if (field) {
-      if (field.mappingKind === 'custom_field' || field.localField.startsWith('cf:')) {
-        const key = field.localField.startsWith('cf:') ? field.localField.slice(3) : field.localField
-        return record.fields[`cf:${key}`] ?? ''
-      }
-      // Includes the external_id (key) column: read()/list()-derived records carry the key
-      // value under its localField; fall back to any raw source value, then blank.
-      return record.fields[field.localField] ?? record.raw?.[header] ?? ''
-    }
-    return record.raw?.[header] ?? ''
-  })
 }
 
 export const googleSheetsAdapter: DataSyncAdapter = {
@@ -637,19 +621,6 @@ function parseExportCursor(raw: string | undefined): { phase: ExportPhase; offse
   } catch {
     return { phase: 'updates', offset: 0 }
   }
-}
-/** Derive a new record's external id from the value of its key-column field. */
-function deriveExternalId(record: NormalizedRecord, mapping: DataMapping, keyColumn: string): string | null {
-  const field = (mapping.fields ?? []).find((f) => f.externalField === keyColumn)
-  if (!field) return null
-  // Mirror recordToRow's key resolution so the derived id matches the value written to the row.
-  const isCustom = field.mappingKind === 'custom_field' || field.localField.startsWith('cf:')
-  const key = isCustom
-    ? `cf:${field.localField.startsWith('cf:') ? field.localField.slice(3) : field.localField}`
-    : field.localField
-  const raw = record.fields[key]
-  const value = raw == null ? '' : String(raw).trim()
-  return value.length > 0 ? value : null
 }
 function columnLetter(column: number): string {
   let n = Math.max(1, Math.floor(column))
