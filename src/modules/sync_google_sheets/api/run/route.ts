@@ -46,7 +46,8 @@ export async function POST(req: Request): Promise<Response> {
   // bidirectional-chain subscriber fires the export run once the import completes.
   const runDirection: 'import' | 'export' = requested === 'export' ? 'export' : 'import'
 
-  const syncRunService = container.resolve('syncRunService') as SyncRunService
+  // Core data_sync registers this service as 'dataSyncRunService' (see data_sync/di.ts).
+  const syncRunService = container.resolve('dataSyncRunService') as SyncRunService
   const progressService = container.resolve('progressService') as ProgressService
 
   const { run } = await startDataSyncRun({

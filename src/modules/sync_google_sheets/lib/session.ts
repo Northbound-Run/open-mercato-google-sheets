@@ -1,5 +1,5 @@
 import type { AppContainer } from '@open-mercato/shared/lib/di/container'
-import { getValidAccessToken } from './oauth'
+import { buildAccessTokenProvider } from './access-token-provider'
 import { createGoogleSheetsClient, type GoogleSheetsClient } from './sheets-client'
 import { SYNC_GOOGLE_SHEETS_INTEGRATION_ID, type BindingScope } from './config'
 
@@ -9,9 +9,11 @@ type CredentialsServiceLike = {
 }
 
 /**
- * Resolve the tenant's stored Google credentials and build an authenticated Sheets client
- * whose access-token provider refreshes on expiry and persists the refreshed token. Used by
- * request-time routes (preview) that don't go through the sync engine.
+ * Resolve the tenant's stored Google credentials and build an authenticated Sheets client.
+ * Used by request-time routes (preview) that don't go through the sync engine. Auth matches
+ * the adapter: service-account credentials (blob or GOOGLE_SHEETS_SA_* env) mint tokens
+ * directly; otherwise the OAuth access-token provider refreshes on expiry and persists the
+ * refreshed token.
  */
 export async function createAuthedSheetsClient(
   container: AppContainer,
@@ -20,15 +22,7 @@ export async function createAuthedSheetsClient(
   const credentialsService = container.resolve('integrationCredentialsService') as CredentialsServiceLike
   const credentials = { ...((await credentialsService.resolve(SYNC_GOOGLE_SHEETS_INTEGRATION_ID, scope)) ?? {}) }
   const client = createGoogleSheetsClient({
-    accessTokenProvider: async (opts) =>
-      getValidAccessToken({
-        credentials,
-        forceRefresh: opts?.forceRefresh,
-        onRefreshed: async (tokens) => {
-          Object.assign(credentials, tokens)
-          await credentialsService.save(SYNC_GOOGLE_SHEETS_INTEGRATION_ID, { ...credentials }, scope)
-        },
-      }),
+    accessTokenProvider: buildAccessTokenProvider(credentials, scope, credentialsService),
   })
   return { client, credentials }
 }

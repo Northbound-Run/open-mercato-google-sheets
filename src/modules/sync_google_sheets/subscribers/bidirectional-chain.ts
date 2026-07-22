@@ -64,7 +64,8 @@ export default async function handler(event: unknown, ctx: SubscriberCtx): Promi
   const binding = await createSheetBindingService(em).get(entityType, scope)
   if (!binding || binding.direction !== 'bidirectional') return
 
-  const syncRunService = resolveService<SyncRunService>(ctx, 'syncRunService')
+  // Core data_sync registers this service as 'dataSyncRunService' (see data_sync/di.ts).
+  const syncRunService = resolveService<SyncRunService>(ctx, 'dataSyncRunService')
   const progressService = resolveService<ProgressService>(ctx, 'progressService')
   if (!syncRunService || !progressService) return
 

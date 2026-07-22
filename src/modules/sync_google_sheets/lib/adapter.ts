@@ -23,13 +23,11 @@ import { deriveExternalId, recordToRow } from './row-mapping'
 import {
   buildA1Range,
   createGoogleSheetsClient,
-  type AccessTokenProvider,
   type GoogleSheetsClient,
   type SheetTab,
   type SpreadsheetMeta,
 } from './sheets-client'
-import { getValidAccessToken, DEFAULT_EXPORT_SCOPES } from './oauth'
-import { createServiceAccountTokenProvider, resolveServiceAccountCredentials } from './service-account'
+import { buildAccessTokenProvider } from './access-token-provider'
 import { getWriter, listWriterEntityTypes, requireWriter } from './writers/registry'
 import type { NormalizedRecord, WriterContext } from './writers/types'
 
@@ -48,31 +46,6 @@ type CredentialsService = {
 /** Convert a command-style entity type (`customers.person`) to a query/coverage id (`customers:person`). */
 function toCoverageEntityId(entityType: string): string {
   return entityType.replace('.', ':')
-}
-
-/**
- * Build an access-token provider bound to the run's stored credentials. Service-account
- * credentials (blob or env) mint tokens directly from the SA key — no refresh or persist;
- * otherwise fall back to the OAuth refresh-token path, persisting refreshed tokens.
- */
-function buildAccessTokenProvider(
-  credentials: Record<string, unknown>,
-  scope: TenantScope,
-  credentialsService: CredentialsService,
-): AccessTokenProvider {
-  const serviceAccount = resolveServiceAccountCredentials(credentials)
-  if (serviceAccount) {
-    return createServiceAccountTokenProvider({ credentials: serviceAccount })
-  }
-  return async (opts) =>
-    getValidAccessToken({
-      credentials,
-      forceRefresh: opts?.forceRefresh,
-      onRefreshed: async (tokens) => {
-        Object.assign(credentials, tokens)
-        await credentialsService.save(SYNC_GOOGLE_SHEETS_INTEGRATION_ID, { ...credentials }, scope)
-      },
-    })
 }
 
 function resolveTab(meta: SpreadsheetMeta, binding: { sheetGid?: number | null; sheetTitle: string }): SheetTab {

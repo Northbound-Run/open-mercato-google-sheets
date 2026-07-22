@@ -1,6 +1,6 @@
 {
   "name": "@northbound-run/sync-google-sheets",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Google Sheets ↔ Open Mercato Data Sync adapter: production-ready import, plus experimental scheduled sync and bidirectional export. Entity-agnostic and reusable — not tied to any specific project.",
   "type": "module",
   "main": "./dist/index.js",
@@ -104,12 +104,12 @@
     }
   },
   "dependencies": {
-    "@open-mercato/core": "0.6.5",
-    "@open-mercato/ui": "0.6.5"
+    "awilix": "^12.1.1"
   },
   "peerDependencies": {
     "@mikro-orm/postgresql": "^7.0.14",
-    "@open-mercato/shared": "0.6.5",
+    "@open-mercato/core": "^0.6.5",
+    "@open-mercato/shared": "^0.6.5",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
@@ -118,13 +118,13 @@
     "@mikro-orm/decorators": "^7.0.14",
     "@mikro-orm/migrations": "^7.0.14",
     "@mikro-orm/postgresql": "^7.0.14",
+    "@open-mercato/core": "0.6.5",
     "@open-mercato/shared": "0.6.5",
     "@types/jest": "^30.0.0",
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@types/sanitize-html": "^2.16.1",
-    "awilix": "^12.1.1",
     "esbuild": "^0.28.1",
     "glob": "^13.0.6",
     "jest": "^30.4.2",

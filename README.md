@@ -22,6 +22,8 @@ The adapter ships in three increments: **Increment 1** (import + OAuth) is produ
 yarn add @northbound-run/sync-google-sheets
 ```
 
+The package declares `@open-mercato/core` / `@open-mercato/shared` as **peer dependencies** — your app provides them. This matters: the Data Sync adapter registry is process-global, so a second, nested copy of core installed under this package would leave the adapter invisible to queue workers.
+
 ### 2. Register the module
 
 Add one line to `src/modules.ts` in your Open Mercato app:

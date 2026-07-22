@@ -1,10 +1,9 @@
 import type { EntityManager } from '@mikro-orm/postgresql'
 import { findOneWithDecryption, findWithDecryption } from '@open-mercato/shared/lib/encryption/find'
 import { GoogleSheetsBinding } from '../data/entities'
+import { SYNC_GOOGLE_SHEETS_INTEGRATION_ID, type BindingScope } from './constants'
 
-export const SYNC_GOOGLE_SHEETS_INTEGRATION_ID = 'sync_google_sheets'
-
-export type BindingScope = { organizationId: string; tenantId: string }
+export { SYNC_GOOGLE_SHEETS_INTEGRATION_ID, type BindingScope }
 
 export type SheetBindingInput = {
   entityType: string
