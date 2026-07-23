@@ -1,6 +1,6 @@
 {
   "name": "@northbound-run/sync-google-sheets",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Google Sheets ↔ Open Mercato Data Sync adapter: production-ready import, plus experimental scheduled sync and bidirectional export. Entity-agnostic and reusable — not tied to any specific project.",
   "type": "module",
   "main": "./dist/index.js",
