@@ -18,8 +18,8 @@ import { SYNC_GOOGLE_SHEETS_INTEGRATION_ID, createSheetBindingService, type Bind
 import { createContentHashService, computeContentHash } from './content-hash'
 import { decideSync, type SyncDecision } from './conflict-detection'
 import { DEFAULT_CONFLICT_POLICY, isConflictPolicy, type ConflictPolicy } from './conflict'
-import { loadSheetMapping, rowToRecord, valuesToRecords } from './mapping'
-import { deriveExternalId, recordToRow } from './row-mapping'
+import { loadSheetMapping, rowToRecord } from './mapping'
+import { deriveExternalId, hasDuplicateHeaders, legacyExternalId, legacyRowFields, recordToRow } from './row-mapping'
 import {
   buildA1Range,
   createGoogleSheetsClient,
@@ -164,6 +164,9 @@ export const googleSheetsAdapter: DataSyncAdapter = {
       .catch(() => ({ modifiedTime: null, headRevisionId: null }))
     const headers = await readHeaderRow(client, binding.spreadsheetId, tab, binding.headerRow)
     const columnCount = Math.max(headers.length, tab.columnCount || 1)
+    // Tabs with repeated (trimmed) headers are where the row-mapping derivation changed; only
+    // they need the legacy pre-fix hash computed alongside (baseline migration — see decideSync).
+    const dupHeaders = hasDuplicateHeaders(headers)
 
     const writerCtx: WriterContext = {
       scope: input.scope,
@@ -180,6 +183,7 @@ export const googleSheetsAdapter: DataSyncAdapter = {
     const importRowWithConflictCheck = async (
       record: NormalizedRecord,
       sourceHash: string,
+      legacySourceHash: string | null,
     ): Promise<ImportItem> => {
       const externalId = record.externalId
       const existingLocalId = await externalIdMappingService.lookupLocalId(
@@ -194,7 +198,7 @@ export const googleSheetsAdapter: DataSyncAdapter = {
         if (current) targetHash = hashFields(current.fields)
       }
       const baselineHash = await hashService.getBaseline(input.entityType, externalId, scope)
-      const decision = decideSync({ policy, writingTo: 'mercato', baselineHash, sourceHash, targetHash })
+      const decision = decideSync({ policy, writingTo: 'mercato', baselineHash, sourceHash, targetHash, legacySourceHash })
 
       if (decision.outcome === 'flag') {
         return {
@@ -249,11 +253,37 @@ export const googleSheetsAdapter: DataSyncAdapter = {
       if (rows.length === 0) break
 
       const items: ImportItem[] = []
-      for (const record of valuesToRecords(headers, rows, input.mapping, binding.keyColumn)) {
+      for (const row of rows) {
+        const record = rowToRecord(headers, row, input.mapping, binding.keyColumn)
+        if (!record) continue
         try {
+          // A duplicated KEY-column header whose dup cells disagree: pre-fix syncs keyed this
+          // row by the last-wins value, so any id-mapping/baseline lives under that other id —
+          // upserting under the current key would create a second record for the same logical
+          // row. Refuse visibly instead (import-only and bidirectional alike).
+          if (dupHeaders) {
+            const legacyKey = legacyExternalId(headers, row, binding.keyColumn)
+            if (legacyKey != null && legacyKey !== record.externalId) {
+              items.push({
+                externalId: record.externalId,
+                action: 'failed',
+                data: {
+                  errorMessage:
+                    `Key column "${binding.keyColumn}" is duplicated with differing values ` +
+                    `(this row's key was "${legacyKey}" before the duplicate-header fix). ` +
+                    `Resolve the duplicate header before syncing this row.`,
+                },
+              })
+              continue
+            }
+          }
           const sourceHash = hashFields(record.fields)
           if (enforceConflicts) {
-            items.push(await importRowWithConflictCheck(record, sourceHash))
+            // On a duplicate-header tab, also hash the PRE-FIX derivation so baselines recorded
+            // before the fix still recognize unchanged content (no false-conflict storm).
+            const legacyFields = dupHeaders ? legacyRowFields(headers, row, input.mapping, binding.keyColumn) : null
+            const legacySourceHash = legacyFields ? hashFields(legacyFields) : null
+            items.push(await importRowWithConflictCheck(record, sourceHash, legacySourceHash))
             continue
           }
           // Import-only binding: no export side, so no conflict is possible — blind upsert.
@@ -333,6 +363,7 @@ export const googleSheetsAdapter: DataSyncAdapter = {
     const headers = await readHeaderRow(client, binding.spreadsheetId, tab, binding.headerRow)
     const keyColumnIndex = headers.indexOf(binding.keyColumn)
     if (keyColumnIndex < 0) throw new Error(`Key column "${binding.keyColumn}" not found in sheet header.`)
+    const dupHeaders = hasDuplicateHeaders(headers)
 
     // Index the current sheet rows: externalId -> row number (where to write), and, for
     // bidirectional bindings, externalId -> current content hash (to detect whether the
@@ -382,6 +413,17 @@ export const googleSheetsAdapter: DataSyncAdapter = {
         return
       }
       const listed = await listFn(writerCtx, { offset, limit: input.batchSize })
+      // One block read per page (not per same-key overwrite) so recordToRow can preserve
+      // non-canonical columns when overwriting an existing row; empty unless bidirectional.
+      const currentRowByRowNumber = new Map<number, unknown[]>()
+      if (enforceConflicts && keyValues.length > 0) {
+        const lastDataRow = binding.dataStartRow + keyValues.length - 1
+        const dataRows = await client.readValues(
+          binding.spreadsheetId,
+          `${quoteTitle(tab.title)}!A${binding.dataStartRow}:${endCol}${lastDataRow}`,
+        )
+        dataRows.forEach((row, i) => currentRowByRowNumber.set(binding.dataStartRow + i, row))
+      }
       const appendRows: unknown[][] = []
       const inPlace: Array<{ range: string; values: unknown[][] }> = []
       const pendingMappings: Array<{ localId: string; externalId: string; hash: string }> = []
@@ -404,8 +446,12 @@ export const googleSheetsAdapter: DataSyncAdapter = {
             results.push({ localId, externalId: '', status: 'skipped', error: 'record has no key-column value' })
             continue
           }
-          const rowValues = recordToRow(headers, record, input.mapping)
           const existingRow = rowByExternalId.get(externalId)
+          // Same-key overwrite: pass the current row so recordToRow preserves its non-canonical
+          // columns (duplicate/blank/unmapped headers) instead of blanking them. Export-only
+          // keeps its full-overwrite semantics (the map above stays empty).
+          const currentRow = existingRow != null ? currentRowByRowNumber.get(existingRow) : undefined
+          const rowValues = recordToRow(headers, record, input.mapping, currentRow)
           if (existingRow != null) {
             // The sheet already holds this key (or a prior interrupted run appended it) —
             // overwrite that row rather than appending a duplicate; keeps the phase retry-safe.
@@ -451,16 +497,27 @@ export const googleSheetsAdapter: DataSyncAdapter = {
     }
 
     // ── Phase 'updates': push updates to records this integration already mapped. ──
-    // For bidirectional export we need the sheet's current content to detect conflicts, so read
-    // the full data block once and hash each row (keyed by externalId). Export-only treats
-    // Mercato as the source of truth and never inspects the sheet's content.
+    // For bidirectional export we need the sheet's current content to detect conflicts and to
+    // preserve non-canonical columns on write, so read the full data block once: per row keep
+    // the current content hash (conflict detection), the PRE-FIX legacy hash on dup-header tabs
+    // (baseline migration), and the raw row itself (recordToRow's preservation source).
+    // Export-only treats Mercato as the source of truth and never inspects the sheet's content.
     const sheetHashByExternalId = new Map<string, string>()
+    const sheetLegacyHashByExternalId = new Map<string, string>()
+    const currentRowByExternalId = new Map<string, unknown[]>()
     if (enforceConflicts && keyValues.length > 0) {
       const lastDataRow = binding.dataStartRow + keyValues.length - 1
       const dataRange = `${quoteTitle(tab.title)}!A${binding.dataStartRow}:${endCol}${lastDataRow}`
       const dataRows = await client.readValues(binding.spreadsheetId, dataRange)
-      for (const sheetRecord of valuesToRecords(headers, dataRows, input.mapping, binding.keyColumn)) {
-        sheetHashByExternalId.set(sheetRecord.externalId, hashFields(sheetRecord.fields))
+      for (const row of dataRows) {
+        const record = rowToRecord(headers, row, input.mapping, binding.keyColumn)
+        if (!record) continue
+        sheetHashByExternalId.set(record.externalId, hashFields(record.fields))
+        currentRowByExternalId.set(record.externalId, row)
+        if (dupHeaders) {
+          const legacyFields = legacyRowFields(headers, row, input.mapping, binding.keyColumn)
+          if (legacyFields) sheetLegacyHashByExternalId.set(record.externalId, hashFields(legacyFields))
+        }
       }
     }
 
@@ -502,6 +559,7 @@ export const googleSheetsAdapter: DataSyncAdapter = {
               baselineHash,
               sourceHash,
               targetHash: sheetHashByExternalId.get(externalId) ?? null,
+              legacyTargetHash: sheetLegacyHashByExternalId.get(externalId) ?? null,
             })
           : // Export-only: Mercato is the source of truth — overwrite the sheet, skip no-ops.
             sourceHash === baselineHash
@@ -525,8 +583,9 @@ export const googleSheetsAdapter: DataSyncAdapter = {
           results.push({ localId, externalId, status: 'skipped', error: decision.reason })
           continue
         }
-        // apply: queue the row write; defer the baseline until the batch write lands.
-        const rowValues = recordToRow(headers, record, input.mapping)
+        // apply: queue the row write (preserving the sheet's non-canonical columns when we have
+        // the current row); defer the baseline until the batch write lands.
+        const rowValues = recordToRow(headers, record, input.mapping, currentRowByExternalId.get(externalId))
         const targetRow = rowByExternalId.get(externalId) ?? appendRow++
         updates.push({
           range: `${quoteTitle(tab.title)}!A${targetRow}:${endCol}${targetRow}`,

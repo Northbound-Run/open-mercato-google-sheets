@@ -24,6 +24,14 @@ export type SyncDecisionInput = {
   sourceHash: string
   /** Current content hash of the target side; null when the target has no record/row yet. */
   targetHash: string | null
+  /**
+   * Hash of the source content under the PREVIOUS row-mapping derivation (supplied only on
+   * duplicate-header tabs, where the derivation changed). A legacy match against the baseline
+   * means the side's content is unchanged and only our derivation moved — not an edit.
+   */
+  legacySourceHash?: string | null
+  /** Same as legacySourceHash, for the target side. */
+  legacyTargetHash?: string | null
 }
 
 export type SyncDecision = {
@@ -39,7 +47,7 @@ export type SyncDecision = {
 
 /** Decide whether to apply, skip, or flag a pending one-directional write for one record. */
 export function decideSync(input: SyncDecisionInput): SyncDecision {
-  const { policy, writingTo, baselineHash, sourceHash, targetHash } = input
+  const { policy, writingTo, baselineHash, sourceHash, targetHash, legacySourceHash, legacyTargetHash } = input
 
   // Target has no record/row yet — nothing to conflict with, so create it.
   if (targetHash === null) {
@@ -62,8 +70,38 @@ export function decideSync(input: SyncDecisionInput): SyncDecision {
     }
   }
 
-  const sourceChanged = sourceHash !== baselineHash
-  const targetChanged = targetHash !== baselineHash
+  let sourceChanged = sourceHash !== baselineHash
+  let targetChanged = targetHash !== baselineHash
+
+  // A side whose content matches the baseline under the LEGACY derivation didn't really
+  // change — its current-hash difference is the mapping-derivation fix (e.g. duplicate
+  // headers), not an edit. Correct the flags so the upgrade can't read as a conflict.
+  const sourceIsDerivationOnly = sourceChanged && legacySourceHash != null && legacySourceHash === baselineHash
+  const targetIsDerivationOnly = targetChanged && legacyTargetHash != null && legacyTargetHash === baselineHash
+  if (sourceIsDerivationOnly) sourceChanged = false
+  if (targetIsDerivationOnly) targetChanged = false
+
+  // KNOWN LIMITATION (lossy legacy hash): the legacy derivation only saw the LAST of a
+  // duplicated header's columns, so a target edit confined to an earlier duplicate still
+  // legacy-matches the baseline and is treated as unchanged — a concurrent source edit would
+  // then be applied without flagging. The window closes once the baseline is re-anchored, so
+  // after upgrading on a duplicate-header tab, run IMPORT before export.
+
+  // Both sides already agree on content (e.g. a manual heal, or edits that converged): nothing
+  // to write — just re-anchor the baseline to the agreed content so later runs diff against it.
+  if (sourceHash === targetHash) {
+    return { outcome: 'skip', reason: 'already-in-sync', nextBaseline: sourceHash }
+  }
+
+  // The only movement is our derivation on the SOURCE side, and the target is verifiably
+  // untouched: re-apply under the new derivation (heals rows the old derivation wrote wrong;
+  // a no-op write otherwise) and re-anchor the baseline. Never do this when the derivational
+  // side is the TARGET — the source may hold the old derivation's garbage, and writing it
+  // would corrupt a correct target.
+  if (sourceIsDerivationOnly && !targetChanged) {
+    return { outcome: 'apply', reason: 'rebaseline:derivation-change', nextBaseline: sourceHash }
+  }
+
   const res = resolveConflict({
     policy,
     writingTo,
